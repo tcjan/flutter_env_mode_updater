@@ -1,47 +1,80 @@
-// lib/env_mode_logic.dart
-
 import 'dart:io';
-import 'package:yaml/yaml.dart';
 import 'package:path/path.dart' as p;
+import 'package:yaml/yaml.dart';
 
-/// Toggles environment mode for all pubspec.yaml files under [rootDir].
-/// [mode] can be "dev", "publish", or any other future modes you define.
-///
-/// Returns a log String summarizing what was done.
-Future<String> toggleEnvMode(String mode, Directory rootDir) async {
+/// Toggle between 'dev' and 'publish' mode, rewriting pubspec.yaml references
+/// with minimal quoting in the result.
+Future<String> toggleEnvMode(String requestedMode, Directory rootDir) async {
   final logBuffer = StringBuffer();
-  logBuffer.writeln('toggleEnvMode called with mode: $mode');
-  logBuffer.writeln('Root directory: ${rootDir.path}');
-  logBuffer.writeln('---------------------------------');
 
-  // 1. Load packages from env_mode_config.yaml
-  final configFile = File(p.join(rootDir.path, 'env_mode_config.yaml'));
+  // Step 1: Read or create env_mode_config.yaml
+  final configFilePath = p.join(rootDir.path, 'env_mode_config.yaml');
+  final configFile = File(configFilePath);
+
+  Map<String, dynamic> configMap = {};
   if (!configFile.existsSync()) {
-    final errorMsg = 'ERROR: env_mode_config.yaml not found in ${rootDir.path}';
-    logBuffer.writeln(errorMsg);
+    // Create a new config with an empty environment_packages
+    configMap['current_mode'] = requestedMode;
+    configMap['environment_packages'] = [];
+
+    // Look for subfolders that contain a pubspec.yaml
+    final subdirs = rootDir.listSync(followLinks: false, recursive: false);
+    for (var entity in subdirs) {
+      if (entity is Directory) {
+        final pubspecInSub = File(p.join(entity.path, 'pubspec.yaml'));
+        if (pubspecInSub.existsSync()) {
+          configMap['environment_packages'].add(p.basename(entity.path));
+        }
+      }
+    }
+
+    // Write the initial file
+    configFile.writeAsStringSync(_toYamlString(configMap));
+    logBuffer.writeln('Created env_mode_config.yaml with discovered folders.');
+  } else {
+    // Load existing config
+    final content = configFile.readAsStringSync();
+    final yamlObj = loadYaml(content);
+    configMap = Map<String, dynamic>.from(yamlObj as YamlMap);
+
+    // Ensure keys exist
+    configMap.putIfAbsent('current_mode', () => requestedMode);
+    configMap.putIfAbsent('environment_packages', () => []);
+  }
+
+  // If the user re-requests the same mode, do nothing
+  final currentMode = configMap['current_mode'];
+  if (currentMode == requestedMode) {
+    logBuffer.writeln('Mode is already "$requestedMode". Doing nothing.');
     return logBuffer.toString();
   }
 
-  final configContent = configFile.readAsStringSync();
-  final yamlMap = loadYaml(configContent) as YamlMap;
-  final packages = List<String>.from(yamlMap['environment_packages'] ?? []);
-  logBuffer.writeln('Packages from config: $packages');
+  // Otherwise, update the mode
+  configMap['current_mode'] = requestedMode;
+  configFile.writeAsStringSync(_toYamlString(configMap));
+  logBuffer.writeln('Set current_mode in config to: $requestedMode');
 
-  // 2. Walk through all files under rootDir to find pubspec.yaml
+  // Make sure environment_packages is a valid list
+  final environmentPackages = configMap['environment_packages'];
+  if (environmentPackages is! List || environmentPackages.isEmpty) {
+    logBuffer
+        .writeln('No environment_packages found in config. Aborting toggle.');
+    return logBuffer.toString();
+  }
+
+  // Step 2: Toggle logic
   final backupFilename = 'pubspec.backup.yaml';
-  final List<FileSystemEntity> entities =
-      rootDir.listSync(recursive: true, followLinks: false);
+  final entities = rootDir.listSync(recursive: true, followLinks: false);
 
   for (var entity in entities) {
     if (entity is File && p.basename(entity.path) == 'pubspec.yaml') {
       final pubspecFile = entity;
       final backupFile = File(p.join(p.dirname(entity.path), backupFilename));
 
-      logBuffer.writeln('\nFound pubspec.yaml -> ${pubspecFile.path}');
+      logBuffer.writeln('Found pubspec.yaml -> ${pubspecFile.path}');
 
-      if (mode == 'dev') {
-        // ---- Dev Mode ----
-        // a. Create backup
+      if (requestedMode == 'dev') {
+        // 1) Create backup
         try {
           backupFile.writeAsStringSync(pubspecFile.readAsStringSync());
           logBuffer.writeln('  - Created backup file: ${backupFile.path}');
@@ -50,14 +83,12 @@ Future<String> toggleEnvMode(String mode, Directory rootDir) async {
           continue;
         }
 
-        // b. Update .gitignore in the same folder
+        // 2) Update .gitignore
         final gitignoreFile =
             File(p.join(p.dirname(entity.path), '.gitignore'));
         try {
-          List<String> lines = [];
-          if (gitignoreFile.existsSync()) {
-            lines = gitignoreFile.readAsLinesSync();
-          }
+          List<String> lines =
+              gitignoreFile.existsSync() ? gitignoreFile.readAsLinesSync() : [];
           if (!lines.contains(backupFilename)) {
             final sink = gitignoreFile.openWrite(mode: FileMode.append);
             if (lines.isNotEmpty && lines.last.trim().isNotEmpty) {
@@ -72,27 +103,37 @@ Future<String> toggleEnvMode(String mode, Directory rootDir) async {
           logBuffer.writeln('  - ERROR updating .gitignore: $e');
         }
 
-        // c. Replace each package version with a local path
-        String content = pubspecFile.readAsStringSync();
-        for (final pkg in packages) {
-          // Regex to match lines like "alga_configui: ^1.0.0", ignoring trailing or leading spaces
-          final regex = RegExp(
-              r'^(\s*' + RegExp.escape(pkg) + r'\s*:\s*)([^\s].*)$',
-              multiLine: true);
+        // 3) Replace references with local paths
+        try {
+          final originalContent = pubspecFile.readAsStringSync();
+          final yamlObj = loadYaml(originalContent);
 
-          content = content.replaceAllMapped(regex, (match) {
-            // Build relative path from the current pubspec.yaml folder to the package folder at root
-            final packageFolder = Directory(p.join(rootDir.path, pkg));
-            final relPath =
-                p.relative(packageFolder.path, from: p.dirname(entity.path));
-            return '${match.group(1)}\n  path: ${relPath.replaceAll('\\', '/')}';
-          });
+          // Convert to mutable map
+          final pubspecMap = Map<String, dynamic>.from(yamlObj);
+
+          if (pubspecMap['dependencies'] is Map) {
+            final deps = Map<String, dynamic>.from(pubspecMap['dependencies']);
+            for (final pkg in environmentPackages) {
+              if (deps.containsKey(pkg)) {
+                final packageFolder = Directory(p.join(rootDir.path, pkg));
+                final relativePath = p
+                    .relative(packageFolder.path, from: p.dirname(entity.path))
+                    .replaceAll('\\', '/');
+
+                // Overwrite with path dependency
+                deps[pkg] = {'path': relativePath};
+                logBuffer.writeln('  - Set "$pkg" to path: $relativePath');
+              }
+            }
+            pubspecMap['dependencies'] = deps;
+          }
+
+          // Write back
+          pubspecFile.writeAsStringSync(_toYamlString(pubspecMap));
+        } catch (e) {
+          logBuffer.writeln('  - ERROR rewriting pubspec: $e');
         }
-        pubspecFile.writeAsStringSync(content);
-        logBuffer.writeln('  - Updated dependencies for dev mode');
-      } else if (mode == 'publish') {
-        // ---- Publish Mode ----
-        // a. Restore from backup if exists
+      } else if (requestedMode == 'publish') {
         if (backupFile.existsSync()) {
           try {
             pubspecFile.writeAsStringSync(backupFile.readAsStringSync());
@@ -101,14 +142,63 @@ Future<String> toggleEnvMode(String mode, Directory rootDir) async {
             logBuffer.writeln('  - ERROR restoring from backup: $e');
           }
         } else {
-          logBuffer.writeln('  - No backup found; skipping restore.');
+          logBuffer.writeln('  - No backup found; skipping restore');
         }
       } else {
-        // ---- Future or Unknown Mode ----
-        logBuffer.writeln('  - Unknown mode: $mode (no changes made)');
+        logBuffer.writeln('  - Unknown mode: $requestedMode (no changes made)');
       }
     }
   }
 
   return logBuffer.toString();
+}
+
+/// A minimal YAML writer that only quotes strings if they are empty,
+/// contain newlines, or have leading/trailing whitespace.
+String _toYamlString(dynamic data, {int indent = 0}) {
+  final buffer = StringBuffer();
+  final indentStr = ' ' * indent;
+
+  if (data is Map) {
+    for (final key in data.keys) {
+      final value = data[key];
+      if (value is Map || value is List) {
+        buffer.writeln('$indentStr$key:');
+        buffer.write(_toYamlString(value, indent: indent + 2));
+      } else {
+        buffer.writeln('$indentStr$key: ${_maybeQuoteValue(value)}');
+      }
+    }
+  } else if (data is List) {
+    for (final item in data) {
+      if (item is Map || item is List) {
+        buffer.writeln('$indentStr-');
+        buffer.write(_toYamlString(item, indent: indent + 2));
+      } else {
+        buffer.writeln('$indentStr- ${_maybeQuoteValue(item)}');
+      }
+    }
+  } else {
+    // Scalar at root level
+    buffer.writeln('$indentStr${_maybeQuoteValue(data)}');
+  }
+
+  return buffer.toString();
+}
+
+/// Only quote if empty, has newlines, or leading/trailing spaces.
+String _maybeQuoteValue(dynamic value) {
+  if (value == null) return 'null';
+
+  final text = value.toString();
+
+  // if it has a newline or is empty or has leading/trailing spaces
+  final hasNewline = text.contains('\n');
+  final leadingOrTrailingSpace = text.trim() != text;
+  if (text.isEmpty || hasNewline || leadingOrTrailingSpace) {
+    return '"$text"';
+  }
+
+  // otherwise, leave it as is
+  return text;
 }

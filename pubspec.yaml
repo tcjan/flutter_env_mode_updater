@@ -10,6 +10,7 @@ dependencies:
     sdk: flutter
   yaml: ^3.1.0
   path: any
+  yaml_writer: any
 
 dev_dependencies:
   flutter_test:

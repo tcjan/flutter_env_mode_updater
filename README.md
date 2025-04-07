@@ -87,6 +87,6 @@ This produces an executable in the `build/windows/runner/Release/` folder (for a
 
 ## If you want only a CLI executable (no GUI), use:
 
-dart compile exe bin/console.dart -o toggle_env_mode
+`dart compile exe bin/console.dart -o toggle_env_mode.exe`
 
 Then place the resulting binary (`toggle_env_mode.exe` on Windows, for example) in the base directory alongside `env_mode_config.yaml`. Running it (e.g., `toggle_env_mode dev`) will switch to dev mode, and `toggle_env_mode publish` will revert to publish mode.

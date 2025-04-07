@@ -1,12 +1,8 @@
-// lib/main.dart
-
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
+import 'package:yaml/yaml.dart';
 import 'package:flutter_env_mode_updater/env_mode_logic.dart';
-
-void main() {
-  runApp(const EnvModeApp());
-}
 
 class EnvModeApp extends StatelessWidget {
   const EnvModeApp({Key? key}) : super(key: key);
@@ -32,16 +28,41 @@ class EnvModeHomePage extends StatefulWidget {
 
 class _EnvModeHomePageState extends State<EnvModeHomePage> {
   String _log = '';
-  String _currentMode = 'dev';
+  String _currentMode = 'dev'; // default to dev
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCurrentMode();
+  }
+
+  Future<void> _loadCurrentMode() async {
+    final rootDir = Directory.current;
+    final configFilePath = p.join(rootDir.path, 'env_mode_config.yaml');
+    final configFile = File(configFilePath);
+
+    if (configFile.existsSync()) {
+      final content = configFile.readAsStringSync();
+      final yamlObj = loadYaml(content);
+      if (yamlObj is YamlMap) {
+        final configMap = Map<String, dynamic>.from(yamlObj);
+        final mode = configMap['current_mode'];
+        if (mode is String) {
+          setState(() {
+            _currentMode = mode;
+          });
+        }
+      }
+    }
+  }
 
   Future<void> _onToggleMode() async {
-    // The root directory is assumed to be the current working directory
-    // (where you launch the app).
     final rootDir = Directory.current;
-    // Or you could let the user pick the directory with a file picker, etc.
-
-    // Call the toggle function from your shared logic:
     final result = await toggleEnvMode(_currentMode, rootDir);
+
+    // After toggling, re-read the file so UI stays in sync with the final state
+    await _loadCurrentMode();
+
     setState(() {
       _log = result;
     });
@@ -51,7 +72,7 @@ class _EnvModeHomePageState extends State<EnvModeHomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Flutter Env Mode Updater'),
+        title: Text('Flutter Env Mode Updater (Mode: $_currentMode)'),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -92,4 +113,8 @@ class _EnvModeHomePageState extends State<EnvModeHomePage> {
       ),
     );
   }
+}
+
+void main() {
+  runApp(const EnvModeApp());
 }
