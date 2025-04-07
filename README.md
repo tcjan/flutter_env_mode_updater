@@ -54,3 +54,39 @@ These are the package names to look for in pubspec.yaml files and replace with l
 - In dev mode, any dependency in the list becomes a local path in the discovered pubspec.yaml files.
 - In publish mode, original dependencies are restored from backup.
 - Extend or customize additional modes in env_mode_logic.dart and main.dart (GUI) or console.dart (CLI).
+
+
+# Clarification on Compiling and Distributing a Standalone Executable:
+
+1. Build a Flutter desktop app (for Windows, as an example).
+
+  - Enable Windows desktop support:
+   
+    `flutter config --enable-windows-desktop`
+
+  - In your project folder, run:
+  
+  
+    `flutter build windows`
+
+This produces an executable in the `build/windows/runner/Release/` folder (for a release build). For example, you might see `my_project.exe` there.
+
+2. Distribute the compiled `.exe`.
+
+  - Copy it from `build/windows/runner/Release/my_project.exe` to the base directory of your packages (where `env_mode_config.yaml` resides).
+
+  - You can rename it if you wish (e.g., `flutter_env_mode_updater.exe`).
+
+3. Run the Executable to Toggle Modes.
+
+  - Double-click the `.exe` or run it from a terminal.
+
+  - The GUI will appear if you built a Flutter desktop interface.
+
+  - Any logic for switching between dev/publish modes will be triggered by this standalone binary; no source code access is needed on the target machine.
+
+## If you want only a CLI executable (no GUI), use:
+
+dart compile exe bin/console.dart -o toggle_env_mode
+
+Then place the resulting binary (`toggle_env_mode.exe` on Windows, for example) in the base directory alongside `env_mode_config.yaml`. Running it (e.g., `toggle_env_mode dev`) will switch to dev mode, and `toggle_env_mode publish` will revert to publish mode.
