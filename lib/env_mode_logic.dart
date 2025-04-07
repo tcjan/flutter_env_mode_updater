@@ -2,8 +2,15 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:yaml/yaml.dart';
 
-/// Toggle between 'dev' and 'publish' mode, rewriting pubspec.yaml references
-/// with minimal quoting in the result.
+/// Keys that should always be quoted in any section (e.g. description, homepage, etc.)
+const _alwaysQuoteFields = {
+  'description',
+  'homepage',
+  'repository',
+  'issue_tracker',
+  'documentation',
+};
+
 Future<String> toggleEnvMode(String requestedMode, Directory rootDir) async {
   final logBuffer = StringBuffer();
 
@@ -87,8 +94,9 @@ Future<String> toggleEnvMode(String requestedMode, Directory rootDir) async {
         final gitignoreFile =
             File(p.join(p.dirname(entity.path), '.gitignore'));
         try {
-          List<String> lines =
-              gitignoreFile.existsSync() ? gitignoreFile.readAsLinesSync() : [];
+          final lines = gitignoreFile.existsSync()
+              ? gitignoreFile.readAsLinesSync()
+              : <String>[];
           if (!lines.contains(backupFilename)) {
             final sink = gitignoreFile.openWrite(mode: FileMode.append);
             if (lines.isNotEmpty && lines.last.trim().isNotEmpty) {
@@ -153,52 +161,130 @@ Future<String> toggleEnvMode(String requestedMode, Directory rootDir) async {
   return logBuffer.toString();
 }
 
-/// A minimal YAML writer that only quotes strings if they are empty,
-/// contain newlines, or have leading/trailing whitespace.
-String _toYamlString(dynamic data, {int indent = 0}) {
+/// Convert [data] to YAML with your custom rules:
+/// - Keys in [_alwaysQuoteFields] are always quoted (e.g. "description: '...'").
+/// - Under `environment:`:
+///    * If the key is `sdk` or `flutter`, quote the value (e.g. sdk: ">=3.2.0 <4.0.0").
+///    * Also if the value has ^, <, >, or =, quote it.
+/// - Else unquoted unless empty, newlines, or leading/trailing whitespace.
+/// - If key is `flutter` and value is null or an empty map, prints just `flutter:` with no `null`.
+String _toYamlString(
+  dynamic data, {
+  int indent = 0,
+  String? parentKey,
+}) {
   final buffer = StringBuffer();
   final indentStr = ' ' * indent;
 
   if (data is Map) {
-    for (final key in data.keys) {
-      final value = data[key];
+    for (final rawKey in data.keys) {
+      final key = rawKey.toString();
+      final value = data[rawKey];
+
+      // Special case: If key == "flutter" and it's null or an empty map,
+      // we want to print just "flutter:" with no "null" or "{}".
+      if (key == 'flutter' && _isNullOrEmptyMap(value)) {
+        buffer.writeln('$indentStr$key:');
+        continue;
+      }
+
+      // If value is null (and not the flutter special case), just do "key: null"
+      if (value == null) {
+        buffer.writeln('$indentStr$key: null');
+        continue;
+      }
+
+      // If we have a nested Map or List, recurse
       if (value is Map || value is List) {
         buffer.writeln('$indentStr$key:');
-        buffer.write(_toYamlString(value, indent: indent + 2));
+        buffer.write(_toYamlString(value, indent: indent + 2, parentKey: key));
       } else {
-        buffer.writeln('$indentStr$key: ${_maybeQuoteValue(value)}');
+        // It's a scalar
+        final stringVal = _maybeQuoteValue(
+          value,
+          fieldKey: key,
+          parentKey: parentKey,
+        );
+        buffer.writeln('$indentStr$key: $stringVal');
       }
     }
   } else if (data is List) {
     for (final item in data) {
       if (item is Map || item is List) {
         buffer.writeln('$indentStr-');
-        buffer.write(_toYamlString(item, indent: indent + 2));
+        buffer.write(
+            _toYamlString(item, indent: indent + 2, parentKey: parentKey));
       } else {
-        buffer.writeln('$indentStr- ${_maybeQuoteValue(item)}');
+        final stringVal =
+            _maybeQuoteValue(item, fieldKey: null, parentKey: parentKey);
+        buffer.writeln('$indentStr- $stringVal');
       }
     }
   } else {
-    // Scalar at root level
-    buffer.writeln('$indentStr${_maybeQuoteValue(data)}');
+    // Scalar at the root
+    final stringVal =
+        _maybeQuoteValue(data, fieldKey: null, parentKey: parentKey);
+    buffer.writeln('$indentStr$stringVal');
   }
 
   return buffer.toString();
 }
 
-/// Only quote if empty, has newlines, or leading/trailing spaces.
-String _maybeQuoteValue(dynamic value) {
-  if (value == null) return 'null';
-
+/// Returns a scalar as a YAML-safe string based on rules:
+///
+/// 1) If [fieldKey] is in [_alwaysQuoteFields], always quote it.
+/// 2) If parentKey == 'environment':
+///    - If [fieldKey] is 'sdk' or 'flutter', always quote
+///    - If the text has any of ^, <, >, =, also quote
+/// 3) If the string is empty, or has newlines or leading/trailing whitespace, quote
+/// 4) Otherwise, leave unquoted.
+String _maybeQuoteValue(
+  dynamic value, {
+  required String? fieldKey,
+  required String? parentKey,
+}) {
   final text = value.toString();
-
-  // if it has a newline or is empty or has leading/trailing spaces
+  if (text.isEmpty) {
+    return '""';
+  }
   final hasNewline = text.contains('\n');
   final leadingOrTrailingSpace = text.trim() != text;
-  if (text.isEmpty || hasNewline || leadingOrTrailingSpace) {
+
+  // 1) Always quote certain top-level fields
+  if (fieldKey != null && _alwaysQuoteFields.contains(fieldKey)) {
     return '"$text"';
   }
 
-  // otherwise, leave it as is
+  // 2) If we are inside 'environment'
+  if (parentKey == 'environment') {
+    // If the key is sdk or flutter, always quote
+    if (fieldKey == 'sdk' || fieldKey == 'flutter') {
+      return '"$text"';
+    }
+    // Or if the value has typical version constraint chars
+    final hasVersionChars = text.contains('^') ||
+        text.contains('>') ||
+        text.contains('<') ||
+        text.contains('=');
+
+    if (hasVersionChars || hasNewline || leadingOrTrailingSpace) {
+      return '"$text"';
+    }
+    return text;
+  }
+
+  // 3) Elsewhere, we quote only if newlines or leading/trailing spaces
+  if (hasNewline || leadingOrTrailingSpace) {
+    return '"$text"';
+  }
+
+  // 4) Otherwise, remain unquoted
   return text;
+}
+
+/// Utility: returns true if [obj] is null or an empty map
+bool _isNullOrEmptyMap(dynamic obj) {
+  if (obj == null) return true;
+  if (obj is Map && obj.isEmpty) return true;
+  return false;
 }
