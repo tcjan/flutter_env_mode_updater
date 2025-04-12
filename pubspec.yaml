@@ -11,6 +11,7 @@ dependencies:
   yaml: ^3.1.0
   path: any
   yaml_writer: any
+  file_picker: ^10.1.2
 
 dev_dependencies:
   flutter_test:
